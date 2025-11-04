@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Advanced Live Score Overlay</title>
+    <style>
+        body { margin: 0; background: transparent; overflow: hidden; font-family: 'Helvetica Neue', Arial, sans-serif; }
+        #scoreboard-container {
+            position: absolute; bottom: 15px; left: 50%; transform: translateX(-50%);
+            width: 900px; background: #1a1a1a; color: #ffffff; border-radius: 10px; 
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.7);
+        }
+
+        /* Top Bar: Main Score and Target */
+        .top-bar {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 20px; background: #007bff; border-radius: 10px 10px 0 0;
+        }
+        .main-score-info { display: flex; align-items: baseline; }
+        .team-name-current { font-size: 24px; font-weight: 600; margin-right: 15px; color: #ffffff; }
+        .live-score { font-size: 36px; font-weight: 900; color: #ffffff; }
+        .overs-info { font-size: 18px; color: #ffeb3b; padding: 5px 10px; background: rgba(0,0,0,0.2); border-radius: 4px; margin-left: 15px; }
+        .target-info { font-size: 16px; color: #ffffff; }
+
+        /* Middle Bar: Batsman & Bowler Stats */
+        .stats-bar {
+            display: flex; justify-content: space-between; background: #2c2c2c; padding: 8px 20px;
+        }
+        .player-card { font-size: 14px; color: #cccccc; flex-basis: 30%; }
+        .player-card strong { color: #fff; font-size: 16px; }
+        .stats-detail { color: #87ceeb; margin-left: 10px; }
+        .bowler-analysis { color: #f7b731; font-weight: bold; }
+        .fours-sixs-detail { color: #b1a1ff; }
+
+        /* Bottom Bar: Last Over & Status */
+        .bottom-bar {
+            background: #1a1a1a; padding: 5px 20px; border-radius: 0 0 10px 10px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .last-over-runs { font-size: 14px; color: #cccccc; display: flex; align-items: center; }
+        .last-ball { 
+            display: inline-block; padding: 2px 7px; margin-left: 5px; font-weight: bold; 
+            border-radius: 15px; text-align: center; color: white; transition: all 0.2s;
+        }
+        /* Visual Differentiation for Balls */
+        .run-4 { background: #0056b3; }
+        .run-6 { background: #28a745; }
+        .run-W { background: #dc3545; }
+        .run-E { background: #999; font-size: 12px; } /* Extras */
+        .run-0, .run-1, .run-2, .run-3 { background: #4a4a4a; }
+
+        /* Pop-up Animation Placeholder */
+        #popup-message {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            padding: 15px 30px; font-size: 50px; font-weight: bold; color: white; 
+            border-radius: 15px; display: none; z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="scoreboard-container">
+        <div class="top-bar">
+            <div class="main-score-info">
+                <span class="team-name-current" id="teamNameDisplay">TEAM A</span>
+                <span class="live-score" id="liveScore">0/0</span>
+                <span class="overs-info" id="liveOvers">0.0 Ov</span>
+            </div>
+            <div class="target-info" id="targetInfo"></div>
+        </div>
+        
+        <div class="stats-bar">
+            <div class="player-card">
+                **Striker:** <span id="strikerName"></span>
+                <div class="stats-detail" id="strikerStats"></div>
+            </div>
+            <div class="player-card">
+                **Non-Striker:** <span id="nonStrikerName"></span>
+                <div class="stats-detail" id="nonStrikerStats"></div>
+            </div>
+            <div class="player-card">
+                **Bowler:** <span id="bowlerName"></span>
+                <div class="stats-detail bowler-analysis" id="bowlerStatsDisplay"></div>
+            </div>
+        </div>
+
+        <div class="bottom-bar">
+            <span id="matchStatus"></span>
+            <div class="last-over-runs">
+                Last Over: <span id="lastOverRunsDisplay"></span>
+            </div>
+        </div>
+    </div>
+    
+    <div id="popup-message"></div>
+
+    <script src="https://www.gstatic.com/firebasejs/8.6.8/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.6.8/firebase-database.js"></script>
+    <script>
+        // *******************************************************************
+        // !!! PASTE YOUR FIREBASE CONFIG HERE !!!
+        // *******************************************************************
+        const firebaseConfig = {
+            // YOUR_FIREBASE_CONFIG_HERE
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+        const scoreRef = db.ref('matchData'); 
+
+        // Helper function for SR
+        const calculateSR = (runs, balls) => (balls > 0 ? ((runs / balls) * 100).toFixed(1) : '0.0');
+
+        scoreRef.on('value', (snapshot) => {
+            const data = snapshot.val();
+            if (!data) return;
+
+            const current = data[`innings${data.innings}_score`];
+            const pStats = data.player_stats || {};
+            const bStats = data.bowler_stats || {};
+            const striker = data.current_batsmen.striker;
+            const nonStriker = data.current_batsmen.non_striker;
+            const bowler = data.current_bowler;
+
+            // 1. Update Main Score
+            document.getElementById('teamNameDisplay').innerText = data.current_batting_team;
+            document.getElementById('liveScore').innerText = `${current.score || 0}/${current.wickets || 0}`;
+            document.getElementById('liveOvers').innerText = `${current.overs || 0}.${current.balls || 0} Ov`;
+            
+            // 2. Target Info
+            if (data.innings === 2 && data.innings1_score.target) {
+                 const runsNeeded = data.innings1_score.target - current.score;
+                 document.getElementById('targetInfo').innerText = `Tgt: ${data.innings1_score.target} | Need: ${runsNeeded}`;
+            } else if (data.innings === 1) {
+                 document.getElementById('targetInfo').innerText = `Innings 1 | Extras: ${current.extras}`;
+            }
+
+            // 3. Update Batsman Stats
+            [
+                { id: 'striker', name: striker },
+                { id: 'nonStriker', name: nonStriker }
+            ].forEach(player => {
+                if (pStats[player.name]) {
+                    const s = pStats[player.name];
+                    const sr = calculateSR(s.runs, s.balls_faced);
+                    document.getElementById(`${player.id}Name`).innerText = `${player.name}${player.id === 'striker' ? '*' : ''}`;
+                    document.getElementById(`${player.id}Stats`).innerHTML = 
+                        `<span class="fours-sixs-detail">${s.fours}x4 ${s.sixs}x6</span> | ${s.runs} Runs (${s.balls_faced} Balls) | SR: ${sr}`;
+                }
+            });
+
+            // 4. Update Bowler Stats
+            if (bStats[bowler]) {
+                const b = bStats[bowler];
+                document.getElementById('bowlerName').innerText = bowler;
+                document.getElementById('bowlerStatsDisplay').innerText = 
+                    `${b.overs || 0}.${b.balls || 0}-${b.runs_conceded || 0}-${b.wickets_taken || 0}`;
+            }
+
+            // 5. Last Over Runs Display and Animation Trigger
+            const lastOverRuns = data.last_over_runs || [];
+            let runsHTML = '';
+            let lastAction = null;
+            
+            lastOverRuns.forEach(run => {
+                let className = 'last-ball';
+                let displayRun = run;
+                
+                if (run === 4) { className += ' run-4'; lastAction = 'FOUR'; }
+                else if (run === 6) { className += ' run-6'; lastAction = 'SIX'; }
+                else if (run === 'W') { className += ' run-W'; lastAction = 'WICKET'; }
+                else if (run === 'Wide' || run === 'NoBall') { className += ' run-E'; displayRun = run.slice(0, 1); }
+                else if (run === 0) className += ' run-0';
+                else className += ` run-${run}`;
+
+                runsHTML += `<span class="${className}">${displayRun}</span>`;
+            });
+            document.getElementById('lastOverRunsDisplay').innerHTML = runsHTML;
+            
+            // 6. Animation Pop-up Logic
+            const popup = document.getElementById('popup-message');
+            popup.style.display = 'none';
+
+            if (lastAction) {
+                popup.innerText = lastAction;
+                popup.style.background = lastAction === 'WICKET' ? 'rgba(220, 53, 69, 0.9)' : 
+                                         lastAction === 'SIX' ? 'rgba(40, 167, 69, 0.9)' : 
+                                         lastAction === 'FOUR' ? 'rgba(0, 86, 179, 0.9)' : 'transparent';
+                
+                popup.style.display = 'block';
+                setTimeout(() => { popup.style.display = 'none'; }, 2500); // Hide after 2.5s
+            }
+            
+            // 7. Match Status
+            document.getElementById('matchStatus').innerText = `${data.current_batting_team} is currently batting.`;
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Cricket Scorer Console</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #f4f4f9; }
+        .controls, .setup { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: #fff; }
+        .controls button, input[type="text"], select { 
+            padding: 10px 15px; margin: 5px; font-size: 15px; cursor: pointer; border-radius: 5px;
+        }
+        .score-display { font-size: 20px; font-weight: bold; color: #007bff; }
+        #playerStatsTable { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        #playerStatsTable th, #playerStatsTable td { border: 1px solid #eee; padding: 8px; text-align: left; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <h1>🏏 Live Scorer Console 🏏</h1>
+
+    <div class="setup">
+        <h2>Match Setup</h2>
+        <p>Team 1 Name: <input type="text" id="team1Name" value="India"></p>
+        <p>Team 2 Name: <input type="text" id="team2Name" value="Australia"></p>
+        <p>
+            Team 1 Players (Comma Separated): 
+            <input type="text" id="team1Players" value="Rohit, Virat, SKY, Hardik, Jadeja">
+        </p>
+        <button onclick="setupMatch()">Start/Reset Match</button>
+    </div>
+
+    <div class="score-display" id="currentStatus">Status: Ready to start!</div>
+    <hr>
+    
+    <h2>Current Batsmen & Bowler</h2>
+    <p>Striker: <select id="strikerSelect"></select></p>
+    <p>Non-Striker: <select id="nonStrikerSelect"></select></p>
+    <p>Bowler: <select id="bowlerSelect"></select></p>
+    <button onclick="setPlayers()">Confirm Players</button>
+    <button onclick="swapStrikers()">Swap Strike (Manual)</button>
+
+    <h2>Scoring Actions</h2>
+    <div class="controls">
+        <button onclick="addRun(1)">1 Run</button>
+        <button onclick="addRun(2)">2 Runs</button>
+        <button onclick="addRun(4)">4 Runs</button>
+        <button onclick="addRun(6)">6 Runs</button>
+        <button onclick="addBall(0)">Dot Ball (0)</button>
+        <button style="background-color: #dc3545; color: white;" onclick="addWicket()">Wicket</button>
+        <button style="background-color: #ffc107;" onclick="addExtra('Wide')">Wide (+1 Run)</button>
+        <button style="background-color: #ffc107;" onclick="addExtra('NoBall')">No Ball (+1 Run)</button>
+        <button onclick="nextInnings()">Next Innings</button>
+    </div>
+
+    <h2>All Players Stats</h2>
+    <table id="playerStatsTable">
+        <thead>
+            <tr><th>Player</th><th>R (B)</th><th>4s</th><th>6s</th><th>SR</th><th>Status</th></tr>
+        </thead>
+        <tbody id="statsBody"></tbody>
+    </table>
+
+    <script src="https://www.gstatic.com/firebasejs/8.6.8/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.6.8/firebase-database.js"></script>
+    <script>
+        // *******************************************************************
+        // !!! PASTE YOUR FIREBASE CONFIG HERE !!!
+        // *******************************************************************
+        const firebaseConfig = {
+            // YOUR_FIREBASE_CONFIG_HERE
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+        const scoreRef = db.ref('matchData'); // Root reference for all data
+
+        let matchData = {};
+
+        // 1. Initial Data Structure
+        const initialMatchState = (team1, team2, players) => ({
+            team1: team1, team2: team2,
+            innings: 1, // 1 or 2
+            current_batting_team: team1,
+            innings1_score: { score: 0, wickets: 0, overs: 0, balls: 0, extras: 0, target: null },
+            innings2_score: { score: 0, wickets: 0, overs: 0, balls: 0, extras: 0, target: null },
+            
+            current_batsmen: { striker: players[0], non_striker: players[1] },
+            current_bowler: "BOWLER_X",
+            last_over_runs: [],
+            player_stats: players.reduce((acc, name) => {
+                acc[name] = { runs: 0, balls_faced: 0, fours: 0, sixs: 0, status: 'Not Out' };
+                return acc;
+            }, {}),
+            bowler_stats: { "BOWLER_X": { overs: 0, runs_conceded: 0, wickets_taken: 0 } }
+        });
+
+        // 2. Load and Display Data
+        scoreRef.on('value', (snapshot) => {
+            const data = snapshot.val();
+            if (data) {
+                matchData = data;
+                const current = matchData[`innings${matchData.innings}_score`];
+                const team = matchData.current_batting_team;
+                
+                document.getElementById('currentStatus').innerHTML = 
+                    `**Innings ${matchData.innings}: ${team}** - Score: <strong>${current.score}/${current.wickets}</strong> (${current.overs}.${current.balls} Ov)`;
+                
+                updatePlayerSelects();
+                renderStatsTable();
+            }
+        });
+        
+        // 3. Setup Match
+        window.setupMatch = function() {
+            const team1 = document.getElementById('team1Name').value.trim() || "Team 1";
+            const team2 = document.getElementById('team2Name').value.trim() || "Team 2";
+            const players = document.getElementById('team1Players').value.split(',').map(p => p.trim()).filter(p => p);
+
+            if (players.length < 2) {
+                alert("Please enter at least two players for the starting team.");
+                return;
+            }
+
+            const initial = initialMatchState(team1, team2, players);
+            scoreRef.set(initial);
+        };
+        
+        // 4. Update Firebase
+        function updateFirebase() {
+            const current = matchData[`innings${matchData.innings}_score`];
+            const currentBowler = matchData.current_bowler;
+            const bowlerStats = matchData.bowler_stats[currentBowler];
+            
+            // Over Logic
+            if (current.balls >= 6) {
+                current.overs += 1;
+                current.balls = 0;
+                matchData.last_over_runs = [];
+                bowlerStats.overs += 1;
+                swapStrikers();
+            }
+            scoreRef.set(matchData);
+        }
+        
+        // 5. Scoring Functions
+        window.addRun = function(runs) {
+            const striker = matchData.current_batsmen.striker;
+            const current = matchData[`innings${matchData.innings}_score`];
+            const pStats = matchData.player_stats[striker];
+            
+            current.score += runs;
+            current.balls += 1;
+            pStats.runs += runs;
+            pStats.balls_faced += 1;
+            matchData.bowler_stats[matchData.current_bowler].runs_conceded += runs;
+            matchData.last_over_runs.push(runs);
+
+            if (runs === 4) pStats.fours += 1;
+            if (runs === 6) pStats.sixs += 1;
+            if (runs % 2 !== 0 && runs !== 0) swapStrikersManual();
+            
+            updateFirebase();
+        };
+
+        window.addBall = function(runs) {
+            const striker = matchData.current_batsmen.striker;
+            matchData[`innings${matchData.innings}_score`].balls += 1;
+            matchData.player_stats[striker].balls_faced += 1;
+            matchData.last_over_runs.push(0);
+            updateFirebase();
+        };
+
+        window.addWicket = function() {
+            const striker = matchData.current_batsmen.striker;
+            const current = matchData[`innings${matchData.innings}_score`];
+            const pStats = matchData.player_stats[striker];
+            const bStats = matchData.bowler_stats[matchData.current_bowler];
+
+            current.wickets += 1;
+            current.balls += 1;
+            pStats.balls_faced += 1;
+            pStats.status = 'Out';
+            bStats.wickets_taken += 1;
+            matchData.last_over_runs.push("W");
+            
+            // Prompt for new batsman
+            const newBatsman = prompt(`WICKET! ${striker} is OUT. Enter the name of the new batsman:`);
+            if (newBatsman && matchData.player_stats[newBatsman]) {
+                matchData.current_batsmen.striker = newBatsman;
+            } else {
+                alert("Please manually update the player select dropdowns if a new player is not listed.");
+            }
+            updateFirebase();
+        };
+
+        window.addExtra = function(type) {
+            const runs = 1;
+            matchData[`innings${matchData.innings}_score`].score += runs;
+            matchData[`innings${matchData.innings}_score`].extras += runs;
+            matchData.bowler_stats[matchData.current_bowler].runs_conceded += runs;
+            matchData.last_over_runs.push(type); 
+            // Ball count is not increased for wides/no balls
+            updateFirebase();
+        };
+
+        // 6. Utility Functions
+        window.swapStrikers = function() { // Used after 6 balls
+            const temp = matchData.current_batsmen.striker;
+            matchData.current_batsmen.striker = matchData.current_batsmen.non_striker;
+            matchData.current_batsmen.non_striker = temp;
+        };
+
+        window.swapStrikersManual = function() { // Used after odd runs
+            swapStrikers();
+            updateFirebase();
+        };
+        
+        window.setPlayers = function() {
+            matchData.current_batsmen.striker = document.getElementById('strikerSelect').value;
+            matchData.current_batsmen.non_striker = document.getElementById('nonStrikerSelect').value;
+            matchData.current_bowler = document.getElementById('bowlerSelect').value;
+            updateFirebase();
+        };
+        
+        window.nextInnings = function() {
+             if (matchData.innings === 1) {
+                const team1Score = matchData.innings1_score.score;
+                matchData.innings1_score.target = team1Score + 1;
+                matchData.innings = 2;
+                matchData.current_batting_team = matchData.team2;
+                
+                alert(`Innings 1 complete! Target is ${team1Score + 1}. Starting Innings 2.`);
+            } else {
+                alert("Match Complete!");
+            }
+             scoreRef.set(matchData);
+        };
+        
+        // 7. Render Stats Table
+        function renderStatsTable() {
+            const statsBody = document.getElementById('statsBody');
+            statsBody.innerHTML = '';
+            
+            for (const name in matchData.player_stats) {
+                const p = matchData.player_stats[name];
+                const sr = p.balls_faced > 0 ? ((p.runs / p.balls_faced) * 100).toFixed(1) : '0.0';
+                
+                const tr = statsBody.insertRow();
+                tr.insertCell().innerText = name;
+                tr.insertCell().innerText = `${p.runs} (${p.balls_faced})`;
+                tr.insertCell().innerText = p.fours;
+                tr.insertCell().innerText = p.sixs;
+                tr.insertCell().innerText = sr;
+                tr.insertCell().innerText = p.status;
+            }
+        }
+        
+        // 8. Update Player Select Dropdowns
+        function updatePlayerSelects() {
+            const players = Object.keys(matchData.player_stats);
+            const strikerSelect = document.getElementById('strikerSelect');
+            const nonStrikerSelect = document.getElementById('nonStrikerSelect');
+            const bowlerSelect = document.getElementById('bowlerSelect');
+            
+            [strikerSelect, nonStrikerSelect, bowlerSelect].forEach(select => select.innerHTML = '');
+            
+            players.forEach(name => {
+                const opt = new Option(name, name);
+                strikerSelect.add(opt.cloneNode(true));
+                nonStrikerSelect.add(opt.cloneNode(true));
+                bowlerSelect.add(opt.cloneNode(true));
+            });
+            
+            strikerSelect.value = matchData.current_batsmen.striker;
+            nonStrikerSelect.value = matchData.current_batsmen.non_striker;
+            bowlerSelect.value = matchData.current_bowler;
+        }
+    </script>
+</body>
+</html>
